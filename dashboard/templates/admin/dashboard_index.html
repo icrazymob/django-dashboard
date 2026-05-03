@@ -1,0 +1,23 @@
+{# Drop-in replacement for admin/index.html that fills the index page with   #}
+{# the dashboard alone — the standard app list lives in the side nav, not   #}
+{# in the main content. Wire it up via                                      #}
+{# ``admin.site.index_template = 'admin/dashboard_index.html'``.            #}
+{% extends "admin/index.html" %}
+{% load i18n static %}
+
+{% block extrahead %}
+{{ block.super }}
+{# Pinned-version vendor JS/CSS shipped under static/dashboard/vendor/. #}
+<script src="{% static 'dashboard/vendor/chart.umd.min.js' %}"></script>
+<script src="{% static 'dashboard/vendor/chartjs-adapter-date-fns.bundle.min.js' %}"></script>
+<script src="{% static 'dashboard/vendor/air-datepicker.min.js' %}"></script>
+<link rel="stylesheet" href="{% static 'dashboard/vendor/air-datepicker.min.css' %}">
+{% endblock %}
+
+{# Replace the default content (app list) with the dashboard. #}
+{% block content %}
+{% include "dashboard/_widgets.html" %}
+{% endblock %}
+
+{# Drop the right-hand recent-actions sidebar — keep the page focused. #}
+{% block sidebar %}{% endblock %}

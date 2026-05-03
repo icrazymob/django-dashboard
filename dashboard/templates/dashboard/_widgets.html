@@ -1,0 +1,373 @@
+{% load i18n %}
+{# Reusable dashboard chunk — embeds the filter form + a card grid. Cards    #}
+{# are rendered client-side: the JS fetches the registry-ordered metric     #}
+{# list, builds one <div> per card, and asks the metric_data endpoint for   #}
+{# the chart payload. Per-card granularity overrides the global selector.   #}
+<style>
+  /* Adapts to both vanilla Django admin (light) and themes that toggle a   */
+  /* `.dark` class on <html> (Unfold, etc.). Tailwind-compatible greys.    */
+  .dash-filter, .dash-card {
+    background: #fff;
+    border: 1px solid rgb(229 231 235);
+    color: rgb(17 24 39);
+    border-radius: 8px;
+  }
+  .dark .dash-filter, .dark .dash-card {
+    background: rgb(31 41 55);
+    border-color: rgb(55 65 81);
+    color: rgb(243 244 246);
+  }
+
+  .dash-filter {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 12px 16px; margin-bottom: 16px;
+  }
+  .dash-filter input, .dash-filter select {
+    padding: 6px 10px; border: 1px solid rgb(209 213 219);
+    border-radius: 6px; background: #fff; color: rgb(17 24 39);
+  }
+  .dark .dash-filter input, .dark .dash-filter select {
+    background: rgb(17 24 39); color: rgb(243 244 246);
+    border-color: rgb(75 85 99);
+  }
+  .dash-filter button {
+    padding: 6px 14px; border: none; border-radius: 6px;
+    background: var(--color-primary-600, #4f46e5); color: #fff;
+    cursor: pointer; font-weight: 600;
+  }
+  .dash-filter button:hover { background: var(--color-primary-700, #4338ca); }
+  .dash-filter input[name="filter"] { flex: 1; min-width: 280px; }
+
+  .dash-grid {
+    display: grid; gap: 16px; margin-bottom: 24px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));   /* default: 2 cols */
+  }
+  .dash-grid.cols-1 { grid-template-columns: minmax(0, 1fr); }
+  .dash-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dash-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* Always collapse to a single column on phones, regardless of user choice. */
+  @media (max-width: 700px) {
+    .dash-grid, .dash-grid.cols-1, .dash-grid.cols-2, .dash-grid.cols-3 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .dash-cols-toggle { display: inline-flex; gap: 0; }
+  .dash-cols-toggle button {
+    background: #fff; color: rgb(17 24 39);
+    border: 1px solid rgb(209 213 219);
+    padding: 6px 10px; font-size: 12px; font-weight: 600;
+    cursor: pointer; min-width: 32px;
+  }
+  .dash-cols-toggle button:first-child { border-radius: 6px 0 0 6px; }
+  .dash-cols-toggle button:last-child  { border-radius: 0 6px 6px 0; }
+  .dash-cols-toggle button + button { border-left: 0; }
+  .dark .dash-cols-toggle button {
+    background: rgb(17 24 39); color: rgb(243 244 246);
+    border-color: rgb(75 85 99);
+  }
+  .dash-cols-toggle button.active {
+    background: var(--color-primary-600, #4f46e5); color: #fff;
+    border-color: var(--color-primary-600, #4f46e5);
+  }
+
+  .dash-card { padding: 16px; }
+  .dash-card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 12px;
+  }
+  .dash-card-header h3 { margin: 0; font-size: 14px; font-weight: 600; }
+
+  .dash-card-gran {
+    padding: 3px 8px; font-size: 11px; border: 1px solid rgb(209 213 219);
+    border-radius: 4px; background: #fff; color: rgb(17 24 39); cursor: pointer;
+  }
+  .dark .dash-card-gran {
+    background: rgb(17 24 39); color: rgb(243 244 246);
+    border-color: rgb(75 85 99);
+  }
+  .dash-card-gran[data-overridden="1"] {
+    border-color: var(--color-primary-500, #6366f1);
+    color: var(--color-primary-500, #6366f1); font-weight: 600;
+  }
+
+  .dash-card .canvas-wrap { position: relative; height: 280px; }
+  .dash-loading { color: rgb(107 114 128); font-size: 13px; }
+  .dark .dash-loading { color: rgb(156 163 175); }
+  .dash-error { color: #ef4444; font-size: 13px; }
+</style>
+
+<form id="dash-filter" class="dash-filter">
+  <input id="dash-datepicker" name="date-range" placeholder="{% trans 'Date range' %}" style="min-width: 240px;">
+
+  <select name="granularity" title="{% trans 'Granularity' %}">
+    <option value="day">{% trans 'By day' %}</option>
+    <option value="week">{% trans 'By week' %}</option>
+    <option value="month">{% trans 'By month' %}</option>
+    <option value="year">{% trans 'By year' %}</option>
+  </select>
+
+  <input name="filter" placeholder='{% trans "Filter JSON, e.g." %} {"user_id": 42}'>
+
+  {# Filter-options dropdowns (UTM source/campaign etc.) populated by JS. #}
+  <span id="dash-filter-groups" style="display:contents;"></span>
+
+  <div class="dash-cols-toggle" role="group" aria-label="{% trans 'Columns' %}">
+    <button type="button" data-cols="1" title="{% trans '1 column' %}">1</button>
+    <button type="button" data-cols="2" title="{% trans '2 columns' %}">2</button>
+    <button type="button" data-cols="3" title="{% trans '3 columns' %}">3</button>
+  </div>
+
+  <button type="submit">{% trans 'Apply' %}</button>
+</form>
+
+<div id="dash-grid" class="dash-grid">
+  <div class="dash-loading" style="grid-column: 1 / -1; padding: 16px;">
+    {% trans 'Loading dashboard…' %}
+  </div>
+</div>
+
+<script>
+(function () {
+  const METRIC_LIST_URL = '{% url "dashboard:metric_list" %}';
+  const METRIC_DATA_URL_TEMPLATE = '{% url "dashboard:metric_data" key="__KEY__" %}';
+  const FILTER_OPTIONS_URL = '{% url "dashboard:filter_options" %}';
+
+  // ── Filter form: restore from URL, set up datepicker ────────────────────
+  const params = new URLSearchParams(window.location.search);
+  const form = document.getElementById('dash-filter');
+  const granSel = form.querySelector('[name=granularity]');
+  if (params.get('granularity')) granSel.value = params.get('granularity');
+  const filterInp = form.querySelector('[name=filter]');
+  if (params.get('filter')) filterInp.value = params.get('filter');
+
+  new AirDatepicker('#dash-datepicker', {
+    range: true,
+    dateFormat: 'yyyy-MM-dd',
+    multipleDatesSeparator: ', ',
+    selectedDates: (params.get('date-range') || '')
+      .split(',').map(s => s.trim()).filter(Boolean),
+  });
+
+  // ── Filter-option dropdowns (UTM source / campaign / …) ────────────────
+  // Project supplies `settings.DASHBOARD_FILTER_OPTIONS`; the endpoint
+  // returns `{groups: [{key, label, options: [{label, filter}]}, ...]}`.
+  // Each option's `filter` is a dict that gets merged into the main JSON
+  // filter input on selection (auto-clearing keys absent from the option's
+  // own keyset, so picking a fresh source resets the campaign).
+  const filterGroupsContainer = document.getElementById('dash-filter-groups');
+
+  function readFilterJson() {
+    try { return JSON.parse(filterInp.value || '{}') || {}; }
+    catch (e) { return {}; }
+  }
+
+  function writeFilterJson(obj) {
+    filterInp.value = Object.keys(obj).length ? JSON.stringify(obj) : '';
+  }
+
+  function applyOption(group, option) {
+    const filter = readFilterJson();
+    // Strip the group's keys, then write the option's keys (or nothing for empty).
+    const groupKeys = new Set();
+    (group.options || []).forEach(o =>
+      Object.keys(o.filter || {}).forEach(k => groupKeys.add(k)));
+    groupKeys.forEach(k => delete filter[k]);
+    Object.assign(filter, (option && option.filter) || {});
+    writeFilterJson(filter);
+  }
+
+  function buildFilterDropdown(group) {
+    const select = document.createElement('select');
+    select.dataset.dashFilterGroup = group.key;
+    select.title = group.label;
+
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = '— ' + group.label + ' —';
+    select.appendChild(empty);
+
+    (group.options || []).forEach((opt, idx) => {
+      const o = document.createElement('option');
+      o.value = String(idx);
+      o.textContent = opt.label;
+      select.appendChild(o);
+    });
+
+    // Restore selection from the current filter JSON.
+    const currentFilter = readFilterJson();
+    const matchedIndex = (group.options || []).findIndex(opt =>
+      Object.entries(opt.filter || {}).every(([k, v]) => currentFilter[k] === v)
+      && Object.keys(opt.filter || {}).length > 0
+    );
+    if (matchedIndex >= 0) select.value = String(matchedIndex);
+
+    select.addEventListener('change', () => {
+      const idx = parseInt(select.value, 10);
+      const opt = isNaN(idx) ? null : (group.options || [])[idx];
+      applyOption(group, opt);
+    });
+    return select;
+  }
+
+  fetch(FILTER_OPTIONS_URL, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+    .then(data => {
+      (data.groups || []).forEach(group => {
+        if (!(group.options && group.options.length)) return;
+        filterGroupsContainer.appendChild(buildFilterDropdown(group));
+      });
+    })
+    .catch(() => { /* silent — dropdowns are optional, JSON input still works */ });
+
+  // ── Grid-columns toggle (1 / 2 / 3) ─────────────────────────────────────
+  const COLS_KEY = 'dashboard.cols';
+  const ALLOWED_COLS = ['1', '2', '3'];
+  const grid = document.getElementById('dash-grid');
+  const toggleButtons = form.querySelectorAll('.dash-cols-toggle button');
+
+  function applyCols(cols) {
+    if (!ALLOWED_COLS.includes(cols)) cols = '2';
+    grid.classList.remove('cols-1', 'cols-2', 'cols-3');
+    grid.classList.add('cols-' + cols);
+    toggleButtons.forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.cols === cols);
+    });
+    try { localStorage.setItem(COLS_KEY, cols); } catch (e) { /* private mode */ }
+    // Chart.js auto-resizes via ResizeObserver, but a nudge guarantees the
+    // canvases pick up the new track width even when DevTools is open or
+    // the browser skips the observer.
+    document.querySelectorAll('[data-metric-key]').forEach(card => {
+      if (card._chart) card._chart.resize();
+    });
+  }
+
+  toggleButtons.forEach(btn => {
+    btn.addEventListener('click', () => applyCols(btn.dataset.cols));
+  });
+
+  let savedCols = '2';
+  try { savedCols = localStorage.getItem(COLS_KEY) || '2'; } catch (e) {}
+  applyCols(savedCols);
+
+  // ── Card factory ────────────────────────────────────────────────────────
+  function makeCard(metric) {
+    const card = document.createElement('div');
+    card.className = 'dash-card';
+    card.dataset.metricKey = metric.key;
+    card.innerHTML = `
+      <div class="dash-card-header">
+        <h3></h3>
+        <select class="dash-card-gran" title="{% trans 'Per-chart granularity (overrides global)' %}">
+          <option value="">{% trans 'Inherit' %}</option>
+          <option value="day">{% trans 'Day' %}</option>
+          <option value="week">{% trans 'Week' %}</option>
+          <option value="month">{% trans 'Month' %}</option>
+          <option value="year">{% trans 'Year' %}</option>
+        </select>
+      </div>
+      <div class="canvas-wrap">
+        <canvas></canvas>
+        <div class="dash-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
+          {% trans 'Loading…' %}
+        </div>
+      </div>
+    `;
+    card.querySelector('h3').textContent = metric.title;
+    const sel = card.querySelector('.dash-card-gran');
+    sel.addEventListener('change', () => {
+      sel.dataset.overridden = sel.value ? '1' : '0';
+      loadChart(card);
+    });
+    return card;
+  }
+
+  function buildUrl(card) {
+    const key = card.dataset.metricKey;
+    const localGran = card.querySelector('.dash-card-gran').value;
+    const p = new URLSearchParams(window.location.search);
+    if (localGran) p.set('granularity', localGran);
+    return METRIC_DATA_URL_TEMPLATE.replace('__KEY__', key) + '?' + p.toString();
+  }
+
+  function chartTheme() {
+    const dark = document.documentElement.classList.contains('dark');
+    return {
+      tick: dark ? 'rgb(209 213 219)' : 'rgb(55 65 81)',
+      grid: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
+      legend: dark ? 'rgb(243 244 246)' : 'rgb(17 24 39)',
+    };
+  }
+
+  function renderChart(card, payload) {
+    const canvas = card.querySelector('canvas');
+    const loading = card.querySelector('.dash-loading');
+    if (loading) loading.style.display = 'none';
+    if (card._chart) card._chart.destroy();
+    const t = chartTheme();
+    card._chart = new Chart(canvas, {
+      type: payload.visual_type || 'bar',
+      data: {
+        labels: payload.labels || [],
+        datasets: (payload.datasets || []).map(s => ({
+          label: s.title, data: s.data, fill: false, tension: 0.1,
+        })),
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: {
+          x: { type: 'time', time: { unit: 'day' },
+               ticks: { color: t.tick }, grid: { color: t.grid } },
+          y: { ticks: { color: t.tick }, grid: { color: t.grid } },
+        },
+        plugins: { legend: { labels: { color: t.legend } } },
+      },
+    });
+  }
+
+  // Re-render every chart when the user toggles the admin theme — Unfold
+  // adds/removes the `dark` class on <html>, so we observe that.
+  new MutationObserver(() => {
+    document.querySelectorAll('[data-metric-key]').forEach(card => {
+      if (card._chart) loadChart(card);
+    });
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+
+  function loadChart(card) {
+    const loading = card.querySelector('.dash-loading');
+    loading.classList.remove('dash-error');
+    loading.classList.add('dash-loading');
+    loading.style.display = '';
+    loading.textContent = '{% trans "Loading…" %}';
+    fetch(buildUrl(card), { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+      .then(payload => renderChart(card, payload))
+      .catch(err => {
+        loading.classList.remove('dash-loading');
+        loading.classList.add('dash-error');
+        loading.textContent = 'Ошибка: ' + err;
+      });
+  }
+
+  // ── Bootstrap ───────────────────────────────────────────────────────────
+  fetch(METRIC_LIST_URL, { credentials: 'same-origin' })
+    .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+    .then(data => {
+      const grid = document.getElementById('dash-grid');
+      grid.innerHTML = '';
+      (data.metrics || []).forEach(metric => {
+        const card = makeCard(metric);
+        grid.appendChild(card);
+        loadChart(card);
+      });
+      if (!data.metrics || !data.metrics.length) {
+        grid.innerHTML = '<div class="dash-loading">{% trans "No metrics registered." %}</div>';
+      }
+    })
+    .catch(err => {
+      const grid = document.getElementById('dash-grid');
+      grid.innerHTML = '<div class="dash-error">{% trans "Failed to load metric list:" %} '
+        + String(err).replace(/</g, '&lt;') + '</div>';
+    });
+})();
+</script>
