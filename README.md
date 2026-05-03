@@ -86,6 +86,71 @@ The package name on PyPI/Git is `django-dashboard`; the Python import name is
    admin.site.index_template = 'admin/dashboard_index.html'
    ```
 
+6. Optional: populate the filter-bar dropdowns (UTM source / campaign /
+   anything else relevant). Point at a callable that returns option groups
+   per request:
+
+   ```python
+   # settings.py
+   DASHBOARD_FILTER_OPTIONS = 'myproject.dashboard_metrics.filter_options'
+   ```
+
+   When unset, the form just shows the free-form JSON filter input — the
+   dropdowns simply don't render. See "Filter dropdowns" below.
+
+## Filter dropdowns
+
+The free-form JSON `filter` input is powerful but unfriendly — for common
+fields (UTM source, country, plan, etc.) you want a click-to-pick dropdown
+populated from the live data. The dashboard supports this via a single
+project-supplied callable wired through `settings.DASHBOARD_FILTER_OPTIONS`:
+
+```python
+# myproject/dashboard_metrics.py
+def filter_options(request):
+    """Return option groups for the dashboard filter bar."""
+    from django.db.models import Max
+    from myproject.users.models import User
+
+    sources = (
+        User.objects.exclude(utm_source__isnull=True).exclude(utm_source='')
+        .values('utm_source')
+        .annotate(latest=Max('created_at'))
+        .order_by('-latest')[:200]
+    )
+    return {
+        'groups': [
+            {
+                'key': 'utm_source',
+                'label': 'UTM Source',
+                'options': [
+                    {'label': r['utm_source'],
+                     'filter': {'utm_source': r['utm_source']}}
+                    for r in sources
+                ],
+            },
+            # ...add as many groups as you like (UTM Campaign, Country,
+            # Plan, A/B bucket, …). Each option's `filter` dict is merged
+            # into the main filter input on selection — picking the same
+            # group again replaces only that group's keys, so switching a
+            # parent (e.g. UTM Source) auto-resets the children
+            # (e.g. UTM Campaign).
+        ],
+    }
+```
+
+Then:
+
+```python
+# settings.py
+DASHBOARD_FILTER_OPTIONS = 'myproject.dashboard_metrics.filter_options'
+```
+
+Hot reloads on every request — show top values by recency, gate by
+`request.user.is_superuser`, etc., as needed. The endpoint is staff-gated
+like everything else.
+
+
 That's it. Visit `/admin/dashboard/` (or wherever you mounted it).
 Auth: `@staff_member_required` is enforced on every endpoint.
 
@@ -180,6 +245,7 @@ respect the active granularity from `mreq`.
 |---------------------------------------------|----------------------------|
 | `GET /api/metrics/`                         | list of available metrics  |
 | `GET /api/metrics/<key>/`                   | data for one metric (JSON) |
+| `GET /api/filter-options/`                  | dropdown groups for the filter bar   |
 
 ### Query parameters
 
