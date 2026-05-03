@@ -107,7 +107,7 @@ class SignupsMetric(Metric):
 ```
 
 That's the whole metric. The framework handles date-range filtering,
-granularity bucketing (day/week/month/year), user filtering, and JSON
+granularity bucketing (hour/day/week/month/year), user filtering, and JSON
 serialisation.
 
 ### Common knobs
@@ -183,7 +183,7 @@ respect the active granularity from `mreq`.
 
 ### Query parameters
 
-- `granularity` = `day | week | month | year`  — defaults to `day`.
+- `granularity` = `hour | day | week | month | year`  — defaults to `day`.
 - `date_from`, `date_to` = `YYYY-MM-DD`  — both optional.
 - `date-range` = `YYYY-MM-DD, YYYY-MM-DD`  — alternative single param.
 - `filter` = JSON dict (e.g. `{"user_id": 42}`). Tries direct filter first

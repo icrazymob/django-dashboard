@@ -45,6 +45,7 @@ def metric_data(request, key):
     mreq = MetricRequest.from_http(request)
     payload = metric.compute(mreq).to_dict(visual_type=metric.visual_type)
     payload['title'] = metric.title
+    payload['time_unit'] = mreq.granularity.time_unit
     return JsonResponse(payload)
 
 

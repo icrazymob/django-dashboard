@@ -18,13 +18,14 @@ from typing import Any, ClassVar, Iterable, Optional
 
 from django.core.exceptions import FieldError
 from django.db.models import Count, QuerySet
-from django.db.models.functions import TruncDay, TruncMonth, TruncWeek, TruncYear
+from django.db.models.functions import TruncDay, TruncHour, TruncMonth, TruncWeek, TruncYear
 from django.utils import timezone
 
 
 # ─── Granularity ────────────────────────────────────────────────────────────
 
 class Granularity(str, Enum):
+    HOUR = 'hour'
     DAY = 'day'
     WEEK = 'week'
     MONTH = 'month'
@@ -33,6 +34,11 @@ class Granularity(str, Enum):
     @property
     def trunc_class(self):
         return _TRUNC[self]
+
+    @property
+    def time_unit(self) -> str:
+        """Chart.js time-axis ``unit`` matching this granularity."""
+        return _TIME_UNIT[self]
 
     @classmethod
     def parse(cls, raw):
@@ -45,10 +51,19 @@ class Granularity(str, Enum):
 
 
 _TRUNC = {
+    Granularity.HOUR: TruncHour,
     Granularity.DAY: TruncDay,
     Granularity.WEEK: TruncWeek,
     Granularity.MONTH: TruncMonth,
     Granularity.YEAR: TruncYear,
+}
+
+_TIME_UNIT = {
+    Granularity.HOUR: 'hour',
+    Granularity.DAY: 'day',
+    Granularity.WEEK: 'week',
+    Granularity.MONTH: 'month',
+    Granularity.YEAR: 'year',
 }
 
 
@@ -244,7 +259,12 @@ class Metric:
 def _fmt_label(bucket) -> str:
     if bucket is None:
         return ''
-    if hasattr(bucket, 'date'):
+    if isinstance(bucket, datetime):
+        # Hour-truncated buckets carry a non-zero time component; preserve it
+        # so charts can plot at hour resolution. Midnight-aligned datetimes
+        # (day/week/month/year) collapse to plain ``YYYY-MM-DD`` as before.
+        if bucket.hour or bucket.minute or bucket.second:
+            return bucket.replace(microsecond=0).isoformat()
         return bucket.date().isoformat()
     if isinstance(bucket, date):
         return bucket.isoformat()
